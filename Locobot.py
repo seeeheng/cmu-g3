@@ -1,11 +1,26 @@
 import pyrobot
+import numpy as np
 
 class Locobot:
-    """ Controlling the Locobot through the pyrobot wrapper"""
+    # ANG_HIDE_ARM = [1.8652060275016624, -0.2505083450577331, 0.9004433547235274, 0.9208613171291021, -0.007486316919657954]
+    ANG_HIDE_ARM = [1.6210930191238981, 0.389896031387331, 0.7745488114879888, 0.40635148391957676, -0.0021963282894992275]
+    RANGE_PAN = np.linspace(-0.7,0.7,10)
+    RANGE_TILT = np.linspace(0.7,0.3,10)
 
+
+    """ Controlling the Locobot through the pyrobot wrapper"""
     def __init__(self):
         self.bot = None
         self._initialize_locobot()
+        # pan = left (+ve), right(-ve) / tilt = up (-ve), down(+ve)
+        # self.bot.camera.reset()
+
+        # quick fix for depthmap bug.
+        self.bot.camera.depth_cam.cfg_data['DepthMapFactor']=1.0
+        self.bot.camera.set_pan_tilt(0,0.7)
+        self.bot.arm.go_home()
+        self.camera_state = [0,0]
+        self.camera_transform = pyrobot.algorithms.camera_transform.CameraTransform()
 
     def _initialize_locobot(self):
         self.bot = pyrobot.Robot("locobot", use_base=False)
@@ -13,9 +28,26 @@ class Locobot:
 
     def _hover(self, target_pose):
         """ Move the hand above the 20cm above the given position"""
-        hover_pose = target_pose.position
+        hover_pose = target_pose["position"]
         hover_pose = hover_pose[2] + 0.2
-        self.bot.arm.set_ee_pose(**target_pose)
+        return self.bot.arm.set_ee_pose(**target_pose)
+
+    def hide_arm(self):
+        self.bot.arm.set_joint_positions(self.ANG_HIDE_ARM, plan=False)
+
+    def camera_scan(self):
+        # camera_state given in [pan, tilt]
+        pan_state = self.camera_state[0]
+        tilt_state = self.camera_state[1]
+        self.bot.camera.set_pan_tilt(self.RANGE_PAN[pan_state], self.RANGE_TILT[tilt_state])
+
+        self.camera_state[0] += 1
+        if self.camera_state[0] == len(self.RANGE_PAN):
+            self.camera_state[0] = 0
+            self.camera_state[1] += 1
+        if self.camera_state[1] == len(self.RANGE_TILT):
+            self.camera_state[1] = 0 
+
 
     def get_rgbd(self):
         """ Returns RGB-D image
@@ -49,8 +81,9 @@ class Locobot:
             or a nd.array with 3x3 values (Rotation Matrix.)
         """
         self.bot.gripper.open()
-        self.bot.arm.set_ee_pose(**target_pose)
+        success = self.bot.arm.set_ee_pose(**target_pose)
         self.bot.gripper.close()
+        return success
 
     def place(self, target_pose):
         """ Given a target_pose, place.
@@ -65,6 +98,6 @@ class Locobot:
         """
         self.bot.gripper.close()
         # might need interpolation -> point directly above, then lower the block down. Else will definitely hit the blocks.
-        self._hover(**target_pose)
+        self._hover(target_pose)
         self.bot.arm.set_ee_pose(**target_pose)
         self.bot.gripper.open()
