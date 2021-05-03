@@ -22,6 +22,6 @@ class ATProcessor:
         results = self.at_detector.detect(
             image_gray,
             estimate_tag_pose=True,
-            camera_params=([1,1,1,1]),
+            camera_params=([610.11,321.85,610.11,243.27]),
             tag_size=0.015)
         return results
