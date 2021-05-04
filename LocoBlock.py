@@ -21,15 +21,15 @@ class LocoBlock:
     RESET_POSITION = [-1.5, 0.5, 0.3, -0.7, 0.0]
     N_RESET_ATTEMPTS = 5
     N_FRAMES_SCAN = 500
-    PREGRASP_HEIGHT = 0.2
-    GRASP_HEIGHT = 0.13
+    PREGRASP_HEIGHT = 0.2 # 0.2
+    GRASP_HEIGHT = 0.13 # 0.13
     BASE_FRAME = "base_link"
     KINECT_FRAME = "camera_color_optical_frame"
     MAX_DEPTH = 3.0
     MIN_DEPTH = 0.1
     N_TRIES = 2
     SLEEP_TIME = 2
-    
+    STAGES = ["grasp","insert"]    
 
     BB_SIZE = 5
 
@@ -49,6 +49,7 @@ class LocoBlock:
         self.at_proc = ATProcessor()
         self.frames_processed = 0
         self._transform_listener = TransformListener()
+        self.current_stage = 0
 
     def _initialize_locobot(self):
         self.bot = pyrobot.Robot("locobot", use_base=False)
@@ -108,7 +109,7 @@ class LocoBlock:
             or a nd.array with 3x3 values (Rotation Matrix.)
         """
         self.bot.gripper.open()
-        success = self.bot.arm.set_ee_pose(**target_pose, numerical=False)
+        success = self.bot.arm.set_ee_pose(**target_pose, numerical=False, plan=True)
         self.bot.gripper.close()
         return success
 
@@ -197,7 +198,7 @@ class LocoBlock:
         print("[debug] temp_p obtained = {}".format(temp_p))
         base_pt = self._convert_frames(temp_p)
         # HARD CODED.
-        base_pt = base_pt/-100
+        # base_pt = base_pt/-100
         # HARD CODED.
         print("[debug] base_pt now: {}".format(base_pt))
         return base_pt
@@ -262,14 +263,32 @@ class LocoBlock:
         for _ in range(self.N_TRIES):
             position = np.array(position)
             success = self.bot.arm.set_ee_pose_pitch_roll(
-                position=position, pitch=pitch, roll=roll, plan=False, numerical=False
+                position=position, pitch=pitch, roll=roll, plan=False, numerical=True
             )
             if success == 1:
                 break
         return success
 
+    def drop(self, drop_pose):
+        self.bot.arm.go_home()
+        pregrasp_position = [drop_pose[0], drop_pose[1], self.PREGRASP_HEIGHT]
+        # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
+        grasp_angle = self.get_grasp_angle(drop_pose)
+        grasp_position = [drop_pose[0], drop_pose[1], self.GRASP_HEIGHT]
+        # grasp_pose = Pose(Point(*grasp_position), self.grasp_Q)
+
+        rospy.loginfo("Going to pre-grasp pose:\n\n {} \n".format(pregrasp_position))
+        result = self.set_pose(pregrasp_position, roll=grasp_angle)
+        if not result:
+            return False
+        time.sleep(self.SLEEP_TIME)
+
+        rospy.loginfo("Opening gripper")
+        self.bot.gripper.open()
+        return True
 
     def grasp(self, grasp_pose):
+        self.bot.arm.go_home()
         pregrasp_position = [grasp_pose[0], grasp_pose[1], self.PREGRASP_HEIGHT]
         # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
         grasp_angle = self.get_grasp_angle(grasp_pose)
@@ -298,10 +317,10 @@ class LocoBlock:
             return False
         time.sleep(self.SLEEP_TIME)
 
-        rospy.loginfo("Opening gripper")
-        self.bot.gripper.open()
+        # rospy.loginfo("Opening gripper")
+        # self.bot.gripper.open()
         return True
-        time.sleep(self.SLEEP_TIME)
+        # time.sleep(self.SLEEP_TIME)
 
 
     def do(self):
@@ -309,7 +328,6 @@ class LocoBlock:
 
         while True:
             rgb, depth = self.get_rgbd()
-            print(rgb.shape)
             self.rgb_viz.update(rgb, depth)
             
             if self.frames_processed == self.N_FRAMES_SCAN:
@@ -320,64 +338,30 @@ class LocoBlock:
             results = self.at_proc.get_at_results(rgb)
             if len(results) == 0:
                 self.rgb_viz.show()
-            for result in results:
-                self.rgb_viz.annotate_polylines(result.corners)
-                print("AT results={}".format(result))
-                pix_center = result.center
-                pix_center[1] = 640-pix_center[1]
+            
+            # grasping
+            if self.current_stage == 0:
+                for result in results:
+                    if result.tag_id == 0:
+                        self.rgb_viz.annotate_polylines(result.corners)
+                        print("AT results={}".format(result))
+                        pix_center = result.center
 
-                base_pt = self.get_3D(pix_center)
+                        base_pt = self.get_3D(pix_center)
 
-                # pts, colors = self.bot.camera.pix_to_3dpt(int(pix_center[1]),int(pix_center[0]))
-                # print("Obtained pts = {}".format(pts))
-                self.grasp(base_pt)
-                # pos = {
-                #     "position": np.array([pts[0][0], pts[0][1], pts[0][2]]),
-                #     "orientation": 
-                #     result.pose_R 
-                #     # np.array([
-                #     #     [1,0,0],
-                #     #     [0,1,0],
-                #     #     [0,0,1]
-                #     # ])
-                # }
-                # success = self.pick(pos)
-                # self.exit()
-                exit()
+                        self.grasp(base_pt)
+                        # todo: if pass
+                        self.current_stage += 1
 
-                # print([pts[0][0]/1000, pts[0][1]/1000, pts[0][2]/1000])
-                # bot.bot.arm.go_home()
-                # bot.bot.arm.set_ee_pose_pitch_roll(
-                #     [-pts[0][0]/100, -pts[0][1]/100, pts[0][2]/100], 0, plan=False, numerical=False
-                # )
-                # exit()
+            if self.current_stage == 1:
+                for result in results:
+                    if result.tag_id == 3:
+                        self.rgb_viz.annotate_polylines(result.corners)   
+                        pix_center = result.center
+                        base_pt = self.get_3D(pix_center)
+                        self.drop(base_pt)
+                        exit()
 
-                # pts[0]
-                # print("Camera tf ={}".format(bot.bot.camera.get_link_transform("camera_color_optical_frame", "base_link")[2]))           
-                
-                # # getting transformation from camera link to base link.
-                # camera_tf = bot.bot.camera.get_link_transform("camera_color_optical_frame", "base_link")[2]
-
-                # at_axes_transform = utils.rpyxyz2H((math.pi/2,math.pi/2,0),(0,0,0))
-                # at_transform = utils.rtmat2H(result.pose_R, result.pose_t)
-
-                # # rotate the results, then transform to robot base.
-                # true_t = np.matmul(np.matmul(at_transform, at_axes_transform),camera_tf)
-                # print("true_t={}".format(true_t))
-                # true_t_rotation = true_t[:3,:3]
-                # true_t_translation = true_t[:3,3]
-                # print("Calculated transpose={}, rotation={}".format(true_t_translation, true_t_rotation))
-                # pos = {
-                #     "position": true_t_translation,
-                #     "orientation": true_t_rotation
-                # }
-                # exit()
-
-                # # print(pos)
-                # bot.pick({
-                #     "position": np.array(result.pose_t),
-                #     "orientation": np.array(result.pose_R)
-                # })
 
     def exit(self):
         """ Graceful exit, adpated from LoCoBot example. """
