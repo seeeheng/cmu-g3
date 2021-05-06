@@ -31,6 +31,7 @@ class LocoBlock:
     INSERTION_HEIGHT = 0.18
     BASE_FRAME = "base_link"
     KINECT_FRAME = "camera_color_optical_frame"
+    GRIPPER_FRAME = "gripper_link"
     MAX_DEPTH = 3.0
     MIN_DEPTH = 0.1
     N_TRIES = 2
@@ -224,34 +225,31 @@ class LocoBlock:
     def drop(self, drop_pose):
         self.bot.arm.go_home()
         pregrasp_position = [drop_pose[0], drop_pose[1], self.PREGRASP_HEIGHT+0.05]
-        # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
         grasp_angle = drop_pose[2]
-        # grasp_angle = self.get_grasp_angle(drop_pose)
         grasp_position = [drop_pose[0], drop_pose[1], self.INSERTION_HEIGHT]
-        # grasp_pose = Pose(Point(*grasp_position), self.grasp_Q)
 
-        # drop_positions_x = np.arange(drop_pose[0]-0.005, drop_pose[0]+0.005, 0.001)
-        # drop_positions_y = np.arange(drop_pose[1]-0.005, drop_pose[1]+0.005, 0.001)
-        # drop_heights = np.arange(self.INSERTION_HEIGHT+0.04, self.INSERTION_HEIGHT,-0.004)
-        # drop_execute_list = list(zip(drop_positions_x, drop_positions_y, drop_heights))
+        drop_positions_x = np.arange(drop_pose[0]-0.005, drop_pose[0]+0.005, 0.001)
+        drop_positions_y = np.arange(drop_pose[1]-0.005, drop_pose[1]+0.005, 0.001)
+        drop_heights = np.arange(self.INSERTION_HEIGHT+0.02, self.INSERTION_HEIGHT-0.02,-0.04/10)
+        drop_execute_list = list(zip(drop_positions_x, drop_positions_y, drop_heights))
 
-        result = self.set_pose([drop_pose[0]-0.005, drop_pose[1]-0.005, self.INSERTION_HEIGHT+0.04], roll=grasp_angle, plan=True)
-        if not result:
-            return False
-        time.sleep(self.SLEEP_TIME)
+        # result = self.set_pose([drop_pose[0]-0.005, drop_pose[1]-0.005, self.INSERTION_HEIGHT+0.04], roll=grasp_angle, plan=False)
+        # if not result:
+        #     return False
+        # time.sleep(self.SLEEP_TIME)
         
-        import math
-        result = self.set_pose([drop_pose[0]+0.005, drop_pose[1]+0.005, self.INSERTION_HEIGHT], roll=grasp_angle+math.pi/10, plan=True)
-        if not result:
-            return False
-        time.sleep(self.SLEEP_TIME)
+        # import math
+        # result = self.set_pose([drop_pose[0]+0.005, drop_pose[1]+0.005, self.INSERTION_HEIGHT], roll=grasp_angle, plan=True)
+        # if not result:
+        #     return False
+        # time.sleep(self.SLEEP_TIME)
 
-        # for trajectory in drop_execute_list:
-        #     print(trajectory)
-        #     result = self.set_pose(trajectory, roll=grasp_angle)
-        #     if not result:
-        #         return False
-        #     time.sleep(self.SLEEP_TIME)
+        for trajectory in drop_execute_list:
+            print(trajectory)
+            result = self.set_pose(trajectory, roll=grasp_angle)
+            if not result:
+                return False
+            time.sleep(self.SLEEP_TIME)
 
         # rospy.loginfo("Going to pre-drop pose:\n\n {} \n".format(pregrasp_position))
         # result = self.set_pose(pregrasp_position, roll=grasp_angle+math.pi/10, plan=True)
@@ -270,15 +268,30 @@ class LocoBlock:
         self.bot.gripper.open()
         return True
 
+    def pre_grasp(self, grasp_pose):
+        self.bot.arm.go_home()
+        pregrasp_position = [grasp_pose[0], grasp_pose[1], self.PREGRASP_HEIGHT]
+        rospy.loginfo("Going to pre-grasp pose:\n\n {} \n".format(pregrasp_position))
+        result = self.set_pose(pregrasp_position)
+        if not result:
+            return False
+        time.sleep(self.SLEEP_TIME)
+        return True
+
     def grasp(self, grasp_pose):
         self.bot.arm.go_home()
-        print("ARM currently at home = {}".format(self.bot.arm.pose_ee))
         pregrasp_position = [grasp_pose[0], grasp_pose[1], self.PREGRASP_HEIGHT]
+        rospy.loginfo("Going to pre-grasp pose:\n\n {} \n".format(pregrasp_position))
+        result = self.set_pose(pregrasp_position)
+        if not result:
+            return False
+        time.sleep(self.SLEEP_TIME)
+
         # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
         import math
         # TODO: how???
-        # grasp_angle = 0
-        grasp_angle = grasp_pose[2]-math.pi/2
+        grasp_angle = 0
+        # grasp_angle = grasp_pose[2]-math.pi/2
         # if grasp_angle > math.pi:
         #     grasp_angle -= math.pi
         print("[debug_angle] ANGLE={}".format(grasp_angle))
@@ -287,18 +300,12 @@ class LocoBlock:
         grasp_position = [grasp_pose[0], grasp_pose[1], self.GRASP_HEIGHT]
         # grasp_pose = Pose(Point(*grasp_position), self.grasp_Q)
 
-        rospy.loginfo("Going to pre-grasp pose:\n\n {} \n".format(pregrasp_position))
-        result = self.set_pose(pregrasp_position, roll=grasp_angle)
-        if not result:
-            return False
-        time.sleep(self.SLEEP_TIME)
-
         rospy.loginfo("Going to grasp pose:\n\n {} \n".format(grasp_position))
         result = self.set_pose(grasp_position, roll=grasp_angle)
         if not result:
             return False
         time.sleep(self.SLEEP_TIME)
-        return False
+
         rospy.loginfo("Closing gripper")
         self.bot.gripper.close()
         time.sleep(self.SLEEP_TIME)
@@ -340,7 +347,9 @@ class LocoBlock:
                 for result in results:
                     if result.tag_id == 0:
                         self.rgb_viz.annotate_polylines(result.corners)
-                        print("AT results={}".format(result))
+                        # print("AT results={}".format(result))
+
+                        ## ATTEMPT 1: some rotation.
                         # import math
                         # rotation_matrix = utils.rotationMatrixToEulerAngles(result.pose_R)
                         # print("R={}".format(rotation_matrix))
@@ -351,35 +360,68 @@ class LocoBlock:
                         #         math.degrees(rotation_matrix[2])])
                         #     )
                         # )
-                        t,r = self._transform_listener.lookupTransform(self.BASE_FRAME, self.KINECT_FRAME, rospy.Time(0))
-                        r = R.from_quat(r)
-                        rotation_matrix = np.matmul(r.as_matrix(),result.pose_R)
-                        rotation_matrix = utils.rotationMatrixToEulerAngles(rotation_matrix)
+                        
+                        ## ATTEMPT 2: get rotation from base_frame. Realized it doesn't make sense.
+                        # t,r = self._transform_listener.lookupTransform(self.BASE_FRAME, self.KINECT_FRAME, rospy.Time(0))
+                        # r = R.from_quat(r)
+                        # rotation_matrix = np.matmul(r.as_matrix(),result.pose_R)
+                        # rotation_matrix = utils.rotationMatrixToEulerAngles(rotation_matrix)
 
-                        import math
-                        print("Rdeg={}".format(
-                            np.array([
-                                math.degrees(rotation_matrix[0]),
-                                math.degrees(rotation_matrix[1]),
-                                math.degrees(rotation_matrix[2])])
-                            )
-                        )
-                        
-                        
+                        # import math
+                        # print("Rdeg={}".format(
+                        #     np.array([
+                        #         math.degrees(rotation_matrix[0]),
+                        #         math.degrees(rotation_matrix[1]),
+                        #         math.degrees(rotation_matrix[2])])
+                        #     )
+                        # )
+                                                
                         pix_center = [result.center[1],result.center[0]]
-                        continue
-
+                        
                         # expects in height, then width. AKA y, then x.
                         base_pt = self.get_3D(pix_center)[:2]
+                        # Adding on the rotation, 0 first.
                         base_pt = np.append(base_pt, 0)
+                        # success = self.pre_grasp(base_pt)
+                        # if success:
+                            # at_r = R.from_matrix(result.pose_R)
+                            # at_quaternion = at_r.as_quat()
+                            # from geometry_msgs.msg import PoseStamped
+                            # ps = PoseStamped()
+                            # ps.header.frame_id = self.KINECT_FRAME
+                            # ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = result.pose_t
+                            # ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = at_quaternion 
+                            # base_ps = self._transform_listener.transformPose(self.GRIPPER_FRAME, ps)
+                            # print(base_ps)
+                            # import math
+                            # t,r = self._transform_listener.lookupTransform(self.GRIPPER_FRAME, self.KINECT_FRAME, rospy.Time(0))
+                            # r = R.from_quat(r) # convert from quaternion to rotation matrix
+                            # gripper2kinect_tf = utils.rtmat2H(r.as_matrix(), t)
+                            # kinect2at_tf = utils.rtmat2H(result.pose_R, result.pose_t)
+                            # at_tf = utils.rpyxyz2H([-math.pi/2,math.pi/2,0],[0,0,0])
+                            # kinect2at_tf = np.matmul(kinect2at_tf, at_tf)
+                            # gripper2at_tf = np.matmul(gripper2kinect_tf, kinect2at_tf)
+                            # gripper2at_r, gripper2at_t = utils.H2rtmat(gripper2at_tf)
+                            # print("gripper2at_tf = {}".format(gripper2at_tf))
+                            # print("gripper2at_rads={}".format(utils.rotationMatrixToEulerAngles(gripper2at_r)))
+                            # print("gripper2at_angles=roll{},pitch{},yaw{}".format(
+                            #     math.degrees(utils.rotationMatrixToEulerAngles(gripper2at_r)[0]),
+                            #     math.degrees(utils.rotationMatrixToEulerAngles(gripper2at_r)[1]),
+                            #     math.degrees(utils.rotationMatrixToEulerAngles(gripper2at_r)[2]),
+                            #     ))
+                            # input()
+                            # self.hide_arm()
+                            # continue
+
+
                         success = self.grasp(base_pt)
                         if success:
                             # self.bot.gripper.open()
                             self.hide_arm()
-                            # self.current_stage += 1
+                            self.current_stage += 1
                         else:
                             self.hide_arm()
-            
+
             if self.current_stage == 1:
                 for result in results:
                     if result.tag_id == 3:
@@ -387,17 +429,23 @@ class LocoBlock:
                         print("AT results={}".format(result))  
                         pix_center = [result.center[1],result.center[0]]
                         base_pt = self.get_3D(pix_center)[:2]
-                        rotation_matrix = utils.rotationMatrixToEulerAngles(result.pose_R)
+                        # rotation_matrix = utils.rotationMatrixToEulerAngles(result.pose_R)
                         # print("Rotation: {}".format(rotation_matrix))
-                        base_pt = np.append(base_pt, rotation_matrix[0])
+                        import math
+                        base_pt = np.append(base_pt, math.pi/2)
                         success = self.drop(base_pt)
                         if success:
                             self.bot.arm.go_home()
                             self.hide_arm()
-                            self.current_stage -= 1
+                            self.current_stage += 1
                         else:
                             self.bot.arm.go_home()
                             self.hide_arm()
+            
+            if self.current_stage == 3:
+                x = input()
+                if x == "y":
+                    self.current_stage = 0
 
 
     def exit(self):
