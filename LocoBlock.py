@@ -6,7 +6,10 @@ import copy
 from geometry_msgs.msg import Quaternion, PointStamped
 import rospy
 from tf import TransformListener
+import tf
 import time
+import utils
+from scipy.spatial.transform import Rotation as R
 
 # TODO: Consider
 
@@ -19,16 +22,19 @@ class LocoBlock:
     RESET_PAN = 0.0
     RESET_TILT = 0.8
     RESET_POSITION = [-1.5, 0.5, 0.3, -0.7, 0.0]
+    HOME_POSITION = [0.0028849 , 0.04385043, 0.03886779, 0.99827757]
     N_RESET_ATTEMPTS = 5
-    N_FRAMES_SCAN = 500
+    # N_FRAMES_SCAN = 500
+
     PREGRASP_HEIGHT = 0.2 # 0.2
     GRASP_HEIGHT = 0.13 # 0.13
+    INSERTION_HEIGHT = 0.18
     BASE_FRAME = "base_link"
     KINECT_FRAME = "camera_color_optical_frame"
     MAX_DEPTH = 3.0
     MIN_DEPTH = 0.1
     N_TRIES = 2
-    SLEEP_TIME = 2
+    SLEEP_TIME = 1
     STAGES = ["grasp","insert"]    
 
     BB_SIZE = 5
@@ -91,49 +97,11 @@ class LocoBlock:
         """ Returns current PCL """
         pts, colors = self.bot.camera.get_current_pcd(in_cam=in_cam)
         return pts, colors
-    
-    def set_camera_pan_tilt(self, pose):
-        """ Simple function for setting camera pan/tilt. """
-        pan, tilt = pose
-        self.bot.camera.set_pan_tilt(pan, tilt)
-
-    def pick(self, target_pose):
-        """ Given a pose, pick.
-
-        Open gripper > plan EE to target_pose > close gripper.
-
-        Inputs:
-            target_pose: must be a dict with keys as "position" and "orientation".
-            position must be a nd.array with 3 values.
-            orientation can be either a nd.array with 4 values (Quaternions)
-            or a nd.array with 3x3 values (Rotation Matrix.)
-        """
-        self.bot.gripper.open()
-        success = self.bot.arm.set_ee_pose(**target_pose, numerical=False, plan=True)
-        self.bot.gripper.close()
-        return success
-
-    def place(self, target_pose):
-        """ Given a target_pose, place.
-
-        Plan EE to pose directly above target-pose > plan ee to target_pose > open gripper.
-
-        Inputs:
-            target_pose: must be a dict with keys as "position" and "orientation".
-            position must be a nd.array with 3 values.
-            orientation can be either a nd.array with 4 values (Quaternions)
-            or a nd.array with 3x3 values (Rotation Matrix.)
-        """
-        self.bot.gripper.close()
-        # might need interpolation -> point directly above, then lower the block down. Else will definitely hit the blocks.
-        self._hover(target_pose)
-        self.bot.arm.set_ee_pose(**target_pose)
-        self.bot.gripper.open()
 
     def reset(self):
         success = False
         for _ in range(self.N_RESET_ATTEMPTS):
-            success = self.bot.arm.set_joint_positions(self.RESET_POSITION)
+            success = self.bot.arm.set_joint_positions(self.RESET_POSITION, plan=False)
             if success == True:
                 break
         self.bot.gripper.open()
@@ -170,9 +138,9 @@ class LocoBlock:
     def _get_3D_camera(self, pt, norm_z=None):
         assert len(pt) == 2
         cur_depth = self._process_depth()
-        print("[debug] cur_depth = {}".format(cur_depth))
+        # print("[debug] cur_depth = {}".format(cur_depth))
         z = self._get_z_mean(cur_depth, [pt[0], pt[1]])
-        print("[debug] depth of point is : {}".format(z))
+        # print("[debug] depth of point is : {}".format(z))
         if z == 0.0:
             raise RuntimeError
         if norm_z is not None:
@@ -181,7 +149,7 @@ class LocoBlock:
         v = pt[0]
         # camera intrinsics P
         P = copy.deepcopy(self.bot.camera.camera_P)
-        print("[debug] P is: {}".format(P))
+        # print("[debug] P is: {}".format(P))
         P_n = np.zeros((3, 3))
         P_n[:, :2] = P[:, :2]
         P_n[:, 2] = P[:, 3] + P[:, 2] * z
@@ -191,22 +159,9 @@ class LocoBlock:
         temp_p[-1] = z
         return temp_p
 
-    def get_3D(self, pt, z_norm=None):
-        """ Heavily inspired by LoCoBot example """
-        temp_p = self._get_3D_camera(pt, z_norm)
-        # print("temp_p: {}".format(temp_p))
-        print("[debug] temp_p obtained = {}".format(temp_p))
-        base_pt = self._convert_frames(temp_p)
-        # HARD CODED.
-        # base_pt = base_pt/-100
-        # HARD CODED.
-        print("[debug] base_pt now: {}".format(base_pt))
-        return base_pt
-        # return temp_p
-
     def _convert_frames(self, pt):
         assert len(pt) == 3
-        print("[debug] Point to convert: {}".format(pt))
+        # print("[debug] Point to convert: {}".format(pt))
         ps = PointStamped()
         ps.header.frame_id = self.KINECT_FRAME
         ps.point.x, ps.point.y, ps.point.z = pt
@@ -219,31 +174,28 @@ class LocoBlock:
             )
         )
         base_pt = np.array([base_ps.point.x, base_ps.point.y, base_ps.point.z])
-        print("[debug] Base point to convert: {}".format(base_pt))
+        # print("[debug] Base point to convert: {}".format(base_pt))
         return base_pt
 
-    def get_grasp_angle(self, grasp_pose):
+    def get_3D(self, pt, z_norm=None):
         """ 
-        Obtain normalized grasp angle from the grasp pose.
+        Get 3D point to grasp at, based on sampling using the depth camera.
 
-        This is needs since the grasp angle is relative to the end effector.
-        
-        :param grasp_pose: Desired grasp pose for grasping.
-        :type grasp_pose: list
+        (Heavily inspired by LoCoBot example)
+        https://github.com/facebookresearch/pyrobot/tree/master
 
-        :returns: Relative grasp angle
-        :rtype: float
+        Args:
+            pt: Point to grasp at.
+
+        Returns:
+            base_pt:
         """
+        temp_p = self._get_3D_camera(pt, z_norm)
+        base_pt = self._convert_frames(temp_p)
+        print("[debug] base_pt now: {}".format(base_pt))
+        return base_pt
 
-        cur_angle = np.arctan2(grasp_pose[1], grasp_pose[0])
-        delta_angle = grasp_pose[2] + cur_angle
-        if delta_angle > np.pi / 2:
-            delta_angle = delta_angle - np.pi
-        elif delta_angle < -np.pi / 2:
-            delta_angle = 2 * np.pi + delta_angle
-        return delta_angle
-
-    def set_pose(self, position, pitch=1.57, roll=0.0):
+    def set_pose(self, position, pitch=1.57, roll=0.0, plan=False):
         """ 
         Sets desired end-effector pose.
         
@@ -263,7 +215,7 @@ class LocoBlock:
         for _ in range(self.N_TRIES):
             position = np.array(position)
             success = self.bot.arm.set_ee_pose_pitch_roll(
-                position=position, pitch=pitch, roll=roll, plan=False, numerical=True
+                position=position, pitch=pitch, roll=roll, plan=plan, numerical=False
             )
             if success == 1:
                 break
@@ -271,17 +223,48 @@ class LocoBlock:
 
     def drop(self, drop_pose):
         self.bot.arm.go_home()
-        pregrasp_position = [drop_pose[0], drop_pose[1], self.PREGRASP_HEIGHT]
+        pregrasp_position = [drop_pose[0], drop_pose[1], self.PREGRASP_HEIGHT+0.05]
         # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
-        grasp_angle = self.get_grasp_angle(drop_pose)
-        grasp_position = [drop_pose[0], drop_pose[1], self.GRASP_HEIGHT]
+        grasp_angle = drop_pose[2]
+        # grasp_angle = self.get_grasp_angle(drop_pose)
+        grasp_position = [drop_pose[0], drop_pose[1], self.INSERTION_HEIGHT]
         # grasp_pose = Pose(Point(*grasp_position), self.grasp_Q)
 
-        rospy.loginfo("Going to pre-grasp pose:\n\n {} \n".format(pregrasp_position))
-        result = self.set_pose(pregrasp_position, roll=grasp_angle)
+        # drop_positions_x = np.arange(drop_pose[0]-0.005, drop_pose[0]+0.005, 0.001)
+        # drop_positions_y = np.arange(drop_pose[1]-0.005, drop_pose[1]+0.005, 0.001)
+        # drop_heights = np.arange(self.INSERTION_HEIGHT+0.04, self.INSERTION_HEIGHT,-0.004)
+        # drop_execute_list = list(zip(drop_positions_x, drop_positions_y, drop_heights))
+
+        result = self.set_pose([drop_pose[0]-0.005, drop_pose[1]-0.005, self.INSERTION_HEIGHT+0.04], roll=grasp_angle, plan=True)
         if not result:
             return False
         time.sleep(self.SLEEP_TIME)
+        
+        import math
+        result = self.set_pose([drop_pose[0]+0.005, drop_pose[1]+0.005, self.INSERTION_HEIGHT], roll=grasp_angle+math.pi/10, plan=True)
+        if not result:
+            return False
+        time.sleep(self.SLEEP_TIME)
+
+        # for trajectory in drop_execute_list:
+        #     print(trajectory)
+        #     result = self.set_pose(trajectory, roll=grasp_angle)
+        #     if not result:
+        #         return False
+        #     time.sleep(self.SLEEP_TIME)
+
+        # rospy.loginfo("Going to pre-drop pose:\n\n {} \n".format(pregrasp_position))
+        # result = self.set_pose(pregrasp_position, roll=grasp_angle+math.pi/10, plan=True)
+        # if not result:
+        #     return False
+        # time.sleep(self.SLEEP_TIME)
+
+
+        # rospy.loginfo("Going to grasp pose:\n\n {} \n".format(grasp_position))
+        # result = self.set_pose(grasp_position, roll=grasp_angle, plan=True)
+        # if not result:
+        #     return False
+        # time.sleep(self.SLEEP_TIME)
 
         rospy.loginfo("Opening gripper")
         self.bot.gripper.open()
@@ -289,9 +272,18 @@ class LocoBlock:
 
     def grasp(self, grasp_pose):
         self.bot.arm.go_home()
+        print("ARM currently at home = {}".format(self.bot.arm.pose_ee))
         pregrasp_position = [grasp_pose[0], grasp_pose[1], self.PREGRASP_HEIGHT]
         # pregrasp_pose = Pose(Point(*pregrasp_position), self.default_Q)
-        grasp_angle = self.get_grasp_angle(grasp_pose)
+        import math
+        # TODO: how???
+        # grasp_angle = 0
+        grasp_angle = grasp_pose[2]-math.pi/2
+        # if grasp_angle > math.pi:
+        #     grasp_angle -= math.pi
+        print("[debug_angle] ANGLE={}".format(grasp_angle))
+
+        # grasp_angle = self.get_grasp_angle(grasp_pose)
         grasp_position = [grasp_pose[0], grasp_pose[1], self.GRASP_HEIGHT]
         # grasp_pose = Pose(Point(*grasp_position), self.grasp_Q)
 
@@ -306,10 +298,15 @@ class LocoBlock:
         if not result:
             return False
         time.sleep(self.SLEEP_TIME)
-
+        return False
         rospy.loginfo("Closing gripper")
         self.bot.gripper.close()
         time.sleep(self.SLEEP_TIME)
+        gripper_state = self.bot.gripper.get_gripper_state()
+        print("GRIPPER STATE = {}".format(gripper_state))
+        if gripper_state != 2:
+            self.bot.gripper.open()
+            return False
 
         rospy.loginfo("Going to pre-grasp pose")
         result = self.set_pose(pregrasp_position, roll=grasp_angle)
@@ -322,7 +319,6 @@ class LocoBlock:
         return True
         # time.sleep(self.SLEEP_TIME)
 
-
     def do(self):
         self.hide_arm()
 
@@ -330,11 +326,11 @@ class LocoBlock:
             rgb, depth = self.get_rgbd()
             self.rgb_viz.update(rgb, depth)
             
-            if self.frames_processed == self.N_FRAMES_SCAN:
-                self.camera_scan()
-                self.frames_processed = 0
-            else:
-                self.frames_processed += 1
+            # if self.frames_processed == self.N_FRAMES_SCAN:
+            #     self.camera_scan()
+            #     self.frames_processed = 0
+            # else:
+            #     self.frames_processed += 1
             results = self.at_proc.get_at_results(rgb)
             if len(results) == 0:
                 self.rgb_viz.show()
@@ -345,22 +341,63 @@ class LocoBlock:
                     if result.tag_id == 0:
                         self.rgb_viz.annotate_polylines(result.corners)
                         print("AT results={}".format(result))
-                        pix_center = result.center
+                        # import math
+                        # rotation_matrix = utils.rotationMatrixToEulerAngles(result.pose_R)
+                        # print("R={}".format(rotation_matrix))
+                        # print("Rdeg={}".format(
+                        #     np.array([
+                        #         math.degrees(rotation_matrix[0]),
+                        #         math.degrees(rotation_matrix[1]),
+                        #         math.degrees(rotation_matrix[2])])
+                        #     )
+                        # )
+                        t,r = self._transform_listener.lookupTransform(self.BASE_FRAME, self.KINECT_FRAME, rospy.Time(0))
+                        r = R.from_quat(r)
+                        rotation_matrix = np.matmul(r.as_matrix(),result.pose_R)
+                        rotation_matrix = utils.rotationMatrixToEulerAngles(rotation_matrix)
 
-                        base_pt = self.get_3D(pix_center)
+                        import math
+                        print("Rdeg={}".format(
+                            np.array([
+                                math.degrees(rotation_matrix[0]),
+                                math.degrees(rotation_matrix[1]),
+                                math.degrees(rotation_matrix[2])])
+                            )
+                        )
+                        
+                        
+                        pix_center = [result.center[1],result.center[0]]
+                        continue
 
-                        self.grasp(base_pt)
-                        # todo: if pass
-                        self.current_stage += 1
-
+                        # expects in height, then width. AKA y, then x.
+                        base_pt = self.get_3D(pix_center)[:2]
+                        base_pt = np.append(base_pt, 0)
+                        success = self.grasp(base_pt)
+                        if success:
+                            # self.bot.gripper.open()
+                            self.hide_arm()
+                            # self.current_stage += 1
+                        else:
+                            self.hide_arm()
+            
             if self.current_stage == 1:
                 for result in results:
                     if result.tag_id == 3:
-                        self.rgb_viz.annotate_polylines(result.corners)   
-                        pix_center = result.center
-                        base_pt = self.get_3D(pix_center)
-                        self.drop(base_pt)
-                        exit()
+                        self.rgb_viz.annotate_polylines(result.corners) 
+                        print("AT results={}".format(result))  
+                        pix_center = [result.center[1],result.center[0]]
+                        base_pt = self.get_3D(pix_center)[:2]
+                        rotation_matrix = utils.rotationMatrixToEulerAngles(result.pose_R)
+                        # print("Rotation: {}".format(rotation_matrix))
+                        base_pt = np.append(base_pt, rotation_matrix[0])
+                        success = self.drop(base_pt)
+                        if success:
+                            self.bot.arm.go_home()
+                            self.hide_arm()
+                            self.current_stage -= 1
+                        else:
+                            self.bot.arm.go_home()
+                            self.hide_arm()
 
 
     def exit(self):
@@ -372,3 +409,19 @@ class LocoBlock:
         """ Signal handling function, adapted from LoCoBot example. """
         print("Exit called.")
         self.exit()
+
+                        # fixed_pose_t = [result.pose_t[0],result.pose_t[2],result.pose_t[1]]
+                        # at_transform = utils.rtmat2H(result.pose_R, fixed_pose_t)
+                        # _,_,transform = self.bot.camera.get_link_transform(self.KINECT_FRAME, self.BASE_FRAME)
+                        # print("APRILTAG transform = {}".format(at_transform))
+                        # print("camera-base transform = {}".format(transform))
+                        # converted_trf = np.matmul(at_transform, transform)
+                        # rotation, translation = utils.H2rtmat(converted_trf)
+                        # print("[HT debug] calculated rotation={}, calculated_translation={}".format(rotation, translation))
+                        # self.bot.arm.set_ee_pose(
+                        #     position = translation,
+                        #     orientation = rotation,
+                        #     plan = True,
+                        #     wait = True,
+                        #     numerical = False
+                        # )

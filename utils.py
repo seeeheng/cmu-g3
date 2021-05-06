@@ -19,6 +19,9 @@ def rtmat2H(r_mat, t_mat):
     T[2, 3] = t_mat[2]
     return T
 
+def H2rtmat(H):
+    return H[:3, :3], H[0:3, 3]
+
 def rpyxyz2H(rpy, xyz):
     """ Constructs homogenous transform from rpy and xyz.
     """
@@ -52,3 +55,27 @@ def rpyxyz2H(rpy, xyz):
 
     h_transform = np.matmul(np.matmul(np.matmul(h_transpose,h_rotx),h_roty),h_rotz)
     return h_transform
+
+def isRotationMatrix(R):
+    Rt = np.transpose(R)
+    shouldBeIdentity = np.dot(Rt, R)
+    I = np.identity(3, dtype=R.dtype)
+    n = np.linalg.norm(I - shouldBeIdentity)
+    return n < 1e-6
+
+def rotationMatrixToEulerAngles(R):
+    assert(isRotationMatrix(R))
+    sy = math.sqrt(R[0,0] * R[0,0] + R[1,0] * R[1,0])
+    singular = sy < 1e-6
+
+    if not singular:
+            x = math.atan2(R[2,1] , R[2,2])
+            y = math.atan2(-R[2,0], sy)
+            z = math.atan2(R[1,0], R[0,0])
+
+    else :
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+
+    return np.array([x, y, z])
